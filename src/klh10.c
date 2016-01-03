@@ -325,8 +325,8 @@ CMDDEF(cd_devwait,fc_devwait,   CMRF_TLIN,
 			"[<devid>] [<secs>]",
 			"Wait for device (or all devs)", "")
 #if KLH10_DEV_LITES
-CMDDEF(cd_lights,  fc_lights,   CMRF_TLIN,	"<hexaddr>",
-				"Set console lights I/O base address", "")
+CMDDEF(cd_lights,  fc_lights,   CMRF_TOKS,	"<on|off>",
+				"Set console lights on or off", "")
 #endif
 
 
@@ -2765,24 +2765,25 @@ fc_dump(struct cmd_s *cm)
 static void
 fc_lights(struct cmd_s *cm)
 {
-    unsigned long port = 0;
-    int c;
-    char *sloc = cm->cmd_arglin;
+  char *farg;
+  int r;
 
-    if (sloc && *sloc) {
-        while(isxdigit(c = *sloc++)) {
-	    port *= 16;
-	    port += c - (isdigit(c) ? '0' : (islower(c) ? 'a' : 'A'));
-	}
-	if (!c) switch(port) {
-	case 0x378:		/* LPT1 */
-	case 0x278:		/* LPT2 */
-	    if (!lites_init((unsigned int) port))
-		printf("?Can't init lights -- probably not root\n");
-	    return;
-	}
-    }
-    printf("?Bad address\n");
+  r = cmdargs_one(cm, &farg);
+
+  if (r == 0 || strncmp(farg, "on", 2) == 0 || strncmp(farg, "yes", 3) == 0) {
+    if (lites_init())
+      printf("   Panda Display initialized\n");
+    else
+      printf("   ?Unable to initialize Panda Display\n");
+  } else {
+    lites_shutdown();
+    printf("   Panda Display disabled\n");
+  }
+
+
+
+  return;
+
 }
 
 /* Instruction printing routines */

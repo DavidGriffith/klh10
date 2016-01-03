@@ -51,7 +51,7 @@ CFLAGS_LINT =
 LINKER = $(CC)
 LDFLAGS =
 LDOUTF = -o
-LIBS = 
+LIBS = -lusb-1.0
 
 # Variables specific to this makefile setup
 #	SRC and MAKE_CENV are normally overridden.

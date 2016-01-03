@@ -17,7 +17,7 @@
 **
 **  This file is derived from PandaDisplayTest, which is
 **  Copyright 2004 by Spare Time Gizmos
-**  and is used by permission.  
+**  and is used by permission.
 */
 
 #include "klh10.h"
@@ -31,7 +31,9 @@ static int decosfcclossage;
 
 #if KLH10_DEV_LITES		/* Moby conditional for entire file */
 
-#include <sys/io.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <libusb-1.0/libusb.h>
 #include "dvlites.h"
 
 
@@ -172,56 +174,87 @@ static const unsigned char control[8] = {
 static int port = 0;		/* parallel port, normally LPT1 (0x378)  */
 static int unit = -1;		/* currently selected unit */
 
+static libusb_context *ctx = NULL;
+static libusb_device_handle *dev_handle;
+static int dvlites_errno;
 
-/* One-time initialization
- * Accepts: port base register
- * Returns: T if success, NIL if failure
- */
+#define DISPLAY_BUFSIZE		5
+#define DISPLAY_TIMEOUT		50
 
-int lites_init (unsigned int prt)
+#define DVLITES_ERRLEN		64
+#define DVLITES_ERR_NOT_PANDA	1
+#define DVLITES_ERR_CANT_OPEN	2
+#define DVLITES_ERR_NO_PANDA	3
+
+static char *dvlites_strerror(int num)
 {
-  int ret;
-  unsigned int i;
-				/* enable access to the port */
-  if (ret = !ioperm (prt,PORT_MAX,ENABLE)) {
-    port = prt;			/* access granted, note port */
-    outb (0,port+PORT_CONTROL);	/* initialize the displays */
-    for (i = 0; i <= UNIT_MAX; --i) {
-      lites_setdisplay (i);	/* select unit */
-      lites_setenable (ENABLE);	/* enable the display */
+	char *retstring;
+
+	retstring = malloc(sizeof(char) * DVLITES_ERRLEN);
+
+	switch (num) {
+	case DVLITES_ERR_NOT_PANDA:
+		snprintf(retstring, DVLITES_ERRLEN, "Found USB device matching %x:%x, but it isn't a Panda Display.", VENDOR_ID, PRODUCT_ID);
+		break;
+	case DVLITES_ERR_CANT_OPEN:
+		snprintf(retstring, DVLITES_ERRLEN, "Found USB device that might be a Panda Display, but couldn't open it.");
+		break;
+	case DVLITES_ERR_NO_PANDA:
+		snprintf(retstring, DVLITES_ERRLEN, "No Panda Display found.");
+	}
+
+	return retstring;
+}
+
+
+static libusb_device_handle *get_panda_display_handle(libusb_device **devs)
+{
+  libusb_device *dev;
+  libusb_device_handle *handle = NULL;
+  struct libusb_device_descriptor desc;
+  int i = 0;
+  int r;
+
+  int found = FALSE;
+  int openable = FALSE;
+
+  unsigned char product[STRINGBUF];
+
+  while ((dev = devs[i++]) != NULL) {
+    libusb_get_device_descriptor(dev, &desc); /* this always succeeds */
+    /* Are the VID and PID correct? */
+    if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
+      found = TRUE;
+      r = libusb_open(dev, &handle);
+      if (r < 0) continue;
+      openable = TRUE;
+      r = libusb_get_string_descriptor_ascii(handle, desc.iProduct, product, STRINGBUF);
+      if (r < 0) {
+	libusb_close(handle);
+	dvlites_errno = r;
+	return NULL;
+      }
+      /* Here we have something that matches the free VID and PID
+       * offered by Objective Development.  Now we need to check the
+       * device name to see if it really is a Panda Display.
+       */
+      if (0 == strncmp((char *)product, PRODNAME, PRODNAME_LEN)) {
+	return handle;
+      }
+      libusb_close(handle);
     }
   }
-  return ret;
+  if (found) {
+    if (openable)
+      dvlites_errno = DVLITES_ERR_NOT_PANDA;
+    else
+      dvlites_errno = DVLITES_ERR_CANT_OPEN;
+  } else
+    dvlites_errno = DVLITES_ERR_NO_PANDA;
+
+  return NULL;
 }
 
-
-/* Set a display unit
- * Accepts: unit number (0 - 3)
- *
- * Unfortunately, the Panda display is a write only device, so there's no
- * way to know how many units are attached (or even if there are any
- * attached at all, for that matter!)...
- */
-
-void lites_setdisplay (unsigned int unt)
-{
-  if ((unt <= UNIT_MAX) && (unit != unt)) lites_wreg (REG_SELECT,unit = unt);
-}
-
-
-/* Set the enable for the main data LEDs on the current display
- * Accepts: enable or disable
- *
- * Note that this has no effect on the status LEDs, nor does it change the
- * data actually stored in registers 0..4 - it simply turns off the LED
- * drivers...
- */
-
-void lites_setenable (short enable)
-{
-  lites_wreg (REG_ENABLE,enable ? ENABLE : DISABLE);
-}
-
 /* Display data lights
  * Accepts: 5 bytes of data
  *
@@ -267,16 +300,78 @@ void lites_status (unsigned char data)
 static void lites_wreg (unsigned char reg,unsigned char data)
 {
 				/* if port initted and register valid */
-  if (port && (reg <= REG_MAX)) {
+  if (dev_handle != NULL && (reg <= REG_MAX)) {
 				/* send the data */
-    outb (data,port + PORT_DATA);
-				/* select the register */
-    outb (control[reg],port + PORT_CONTROL);
-				/* pulse strobe */
-    outb (control[reg] | STROBE,port + PORT_CONTROL);
-    outb (control[reg],port + PORT_CONTROL);
+    libusb_control_transfer(dev_handle,
+      LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_OUT,
+      LIBUSB_REQUEST_SET_CONFIGURATION,
+      0x0000,
+      0,
+      &data,
+      DISPLAY_BUFSIZE,
+      DISPLAY_TIMEOUT);
   }
 }
+
+/**********************************************************/
+
+/* One-time initialization
+ * Accepts: void
+ * Returns: TRUE if success, FALSE if failure
+ * Sets dev_handle to the Panda Display, if possible.
+ */
+
+int lites_init (void)
+{
+  libusb_device **devs; //pointer to pointer of device, used to retrieve a list of devices
+  int r; //for return values
+  libusb_context *ctx = NULL; //a libusb session
+  ssize_t cnt; //holding number of devices in list
+
+  if (libusb_init(&ctx) < 0) {
+    printf("?Unable to initialize libusb\n");
+    return FALSE;
+  }
+
+  cnt = libusb_get_device_list(ctx, &devs);
+  if (cnt < 0) {
+    printf("?Unable to get USB device list\n");
+    return FALSE;
+  }
+
+  dev_handle = get_panda_display_handle(devs);
+  if (dev_handle == NULL) {
+    printf("?Unable to get USB device handle\n");
+    return FALSE;
+  }
+
+  if(libusb_kernel_driver_active(dev_handle, 0) == 1) {
+    printf("Kernel driver for Panda Display active\n");
+    if (libusb_detach_kernel_driver(dev_handle, 0) == 0)
+      printf("Kernel driver for Panda Display detached\n");
+  }
+
+  r = libusb_claim_interface(dev_handle, 0);
+  if (r < 0) {
+    printf("?Unable to claim Panda Display interface!\n");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+
+int lites_shutdown(void)
+{
+  if (dev_handle != NULL)
+    libusb_close(dev_handle);
+  libusb_exit(ctx);
+
+  return TRUE;
+}
+
+
+
+
 
 /* Routines specific to the primary display lights */
 
@@ -291,7 +386,6 @@ static unsigned char byte0 = 0;	/* save of aux bits and high 4 pgm lites */
 void lights_pgmlites (unsigned long lh,unsigned long rh)
 {
   unsigned char data[5];
-  lites_setdisplay (UNIT_PGM);	/* select program display lights unit */
 				/* calculate MSB with aux bits */
   byte0 = data[0] = ((lh >> 14) & 0xf) | (byte0 & 0xe0);
   data[1] = (lh >> 6) & 0xff;	/* calculate other bytes */
@@ -307,7 +401,6 @@ void lights_pgmlites (unsigned long lh,unsigned long rh)
 
 void lights_pgmaux (unsigned char aux)
 {
-  lites_setdisplay (UNIT_PGM);	/* select program display lights unit */
 				/* rewrite just the MSB */
   lites_wreg (REG_DATA_MSB,byte0 = (byte0 & 0xf) | ((aux & 0x7) << 5));
 }

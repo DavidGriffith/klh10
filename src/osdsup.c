@@ -170,6 +170,7 @@ os_exit(int status)
 	for (;;) CheckEvents(TRUE);	/* to read final message */
     }
 #endif
+    lites_shutdown();
     exit(status);
 }
 

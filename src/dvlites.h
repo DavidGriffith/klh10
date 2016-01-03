@@ -4,6 +4,10 @@
 /*  Copyright 2005 Mark Crispin
 **  All Rights Reserved
 **
+**  Modified in 2016 by David Griffith
+**  to support the new USB-based Panda Display
+**
+**
 **  This file is part of the KLH10 Distribution.  Use, modification, and
 **  re-distribution is permitted subject to the terms in the file
 **  named "LICENSE", which contains the full text of the legal notices
@@ -17,16 +21,33 @@
 
 #if KLH10_DEV_LITES		/* Moby conditional */
 
+
+#define LITEBUF_SIZE	6
+#define STRINGBUF	256
+
+/*
+ * This is a vendor/device ID pair belonging to Objective Development
+ * and is offered for free for users of their V-USB package.  V-USB is a
+ * library for use with AVR microcontrollers that provides USB
+ * connectivity for chips that lack dedicated USB hardware.  Because we
+ * can conceivably have a device attached that has these ID numbers, but
+ * is not a Panda Display, we must check the device name to be sure.
+ *
+ */
+#define VENDOR_ID	0x16c0	/* Van Ooijen Technische Informatica */
+#define PRODUCT_ID	0x05df  /* HID device except mice, keyboards, and joysticks */
+#define PRODNAME	"Panda Display"
+#define PRODNAME_LEN	13
+
 /* General routines for all displays */
 
 				/* one-time initialize and set port */
-int lites_init (unsigned int prt);
-				/* set current unit */
-void lites_setdisplay (unsigned int unt);
-				/* set enable on current unit */
-void lites_setenable (short enable);
+int lites_init (void);
+int lites_shutdown(void);
+
 				/* write data LEDs on current unit */
 void lites_data (unsigned char data[5]);
+
 				/* write status LEDs on current unit */
 void lites_status (unsigned char data);
 
